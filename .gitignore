@@ -1,0 +1,9 @@
+.chroma/
+data/locomo/
+__pycache__/
+*.pyc
+.env
+.venv/
+dist/
+*.egg-info/
+.pytest_cache/

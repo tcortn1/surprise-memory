@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "surprise-memory"
+version = "0.1.0"
+description = "Surprise-gated memory manager for LLM agents"
+authors = ["Tom Corten"]
+packages = [{ include = "surprise_memory" }]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+chromadb = ">=0.5.0"
+sentence-transformers = ">=3.0.0"
+torch = ">=2.0.0"
+pydantic-settings = ">=2.0.0"
+openai = "^2.36.0"
+datasets = "^4.8.5"
+groq = "^1.2.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7.0.0"
+pytest-mock = ">=3.10.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
