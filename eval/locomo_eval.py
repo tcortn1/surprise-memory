@@ -32,19 +32,58 @@ TOP_K_RETRIEVE = 5
 # ---------------------------------------------------------------------------
 
 def load_locomo(n: int | None = 5) -> list[dict]:
-    try:
-        from datasets import load_dataset
-    except ImportError:
-        raise ImportError("Run: poetry add datasets")
+    import json as _json
+    from pathlib import Path
 
-    print("Loading LoCoMo dataset (streaming to avoid large JSON block issue)...")
-    ds = load_dataset("KhangPTT373/locomo", split="train", streaming=True)
+    cache_path = Path(".cache/locomo_raw.jsonl")
+    cache_path.parent.mkdir(exist_ok=True)
+
+    if not cache_path.exists():
+        print("Downloading LoCoMo dataset via huggingface_hub...")
+        try:
+            from huggingface_hub import hf_hub_download, list_repo_files
+            files = list(list_repo_files("KhangPTT373/locomo", repo_type="dataset"))
+            # prefer full dataset over lite version
+            data_files = [f for f in files if f.endswith(".json") or f.endswith(".jsonl")]
+            target = next((f for f in data_files if "processed_data.json" in f and "locomo_processed" in f), data_files[0] if data_files else None)
+            if not target:
+                raise ValueError(f"No JSON files found. Files: {files}")
+            print(f"  downloading {target}...")
+            raw_path = hf_hub_download(
+                repo_id="KhangPTT373/locomo",
+                filename=target,
+                repo_type="dataset",
+            )
+            # parse and rewrite as JSONL
+            with open(raw_path) as rf:
+                content = rf.read().strip()
+            if content.startswith("["):
+                records = _json.loads(content)
+            else:
+                records = [_json.loads(line) for line in content.splitlines() if line.strip()]
+            with open(cache_path, "w") as wf:
+                for rec in records:
+                    wf.write(_json.dumps(rec) + "\n")
+            print(f"  cached {len(records)} conversations to {cache_path}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to download LoCoMo: {e}")
+
+    print("Loading LoCoMo from local cache...")
     examples = []
-    for i, example in enumerate(ds):
-        if n is not None and i >= n:
-            break
-        examples.append(example)
-        print(f"  loaded conversation {i + 1}", end="\r")
+    seen_ids: set[str] = set()
+    with open(cache_path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            example = _json.loads(line)
+            conv_id = str(example.get("conv_id", ""))
+            if conv_id in seen_ids:
+                continue
+            seen_ids.add(conv_id)
+            examples.append(example)
+            print(f"  loaded conversation {len(examples)}", end="\r")
+            if n is not None and len(examples) >= n:
+                break
     print()
     return examples
 
@@ -128,10 +167,13 @@ def token_f1(retrieved_texts: list[str], answer: str) -> float:
     """
     if not retrieved_texts or not answer.strip():
         return 0.0
-    gold_tokens = set(answer.lower().split())
+    import re
+    def _tokenize(s: str) -> set[str]:
+        return set(re.sub(r"[^\w\s]", "", s.lower()).split())
+    gold_tokens = _tokenize(answer.strip('"'))
     best = 0.0
     for text in retrieved_texts:
-        pred_tokens = set(text.lower().split())
+        pred_tokens = _tokenize(text)
         common = pred_tokens & gold_tokens
         if not common:
             continue
@@ -143,10 +185,11 @@ def token_f1(retrieved_texts: list[str], answer: str) -> float:
     return best
 
 
-def generation_f1(retrieved_texts: list[str], question: str, gold_answer: str, client, model: str) -> float:
-    """Generate answer from retrieved context, compute token F1 against gold. Same methodology as SimpleMem."""
+def generation_f1(retrieved_texts: list[str], question: str, gold_answer: str, client, model: str) -> tuple[float, str]:
+    """Generate answer from retrieved context, compute token F1 against gold.
+    Returns (f1_score, generated_answer)."""
     if not retrieved_texts or not gold_answer.strip():
-        return 0.0
+        return 0.0, ""
     import time
     from openai import RateLimitError, APITimeoutError, APIConnectionError
     context = "\n".join(f"- {t}" for t in retrieved_texts)
@@ -165,22 +208,26 @@ def generation_f1(retrieved_texts: list[str], question: str, gold_answer: str, c
                 timeout=30.0,
             )
             generated = response.choices[0].message.content.strip()
-            pred_tokens = set(generated.lower().split())
-            gold_tokens = set(gold_answer.lower().split())
+            import re as _re
+            def _tok(s: str) -> set[str]:
+                return set(_re.sub(r"[^\w\s]", "", s.lower()).split())
+            pred_tokens = _tok(generated)
+            gold_tokens = _tok(gold_answer.strip('"'))
             if not pred_tokens or not gold_tokens:
-                return 0.0
+                return 0.0, generated
             common = pred_tokens & gold_tokens
             if not common:
-                return 0.0
+                return 0.0, generated
             precision = len(common) / len(pred_tokens)
             recall = len(common) / len(gold_tokens)
-            return 2 * precision * recall / (precision + recall)
+            f1 = 2 * precision * recall / (precision + recall)
+            return f1, generated
         except (RateLimitError, APITimeoutError, APIConnectionError):
             if attempt == 3:
-                return 0.0
+                return 0.0, ""
             time.sleep(delay)
             delay *= 2
-    return 0.0
+    return 0.0, ""
 
 
 def retrieval_hit(retrieved_texts: list[str], answer: str, embedder: Embedder) -> bool:
@@ -309,7 +356,7 @@ def run_locomo_eval(
 
     for i, conversation in enumerate(dataset):
         conv_id = str(conversation.get("conv_id", i))
-        persist_dir = f"{tmpdir}/{result.baseline_name}/{conv_id}"
+        persist_dir = f"{tmpdir}/{result.baseline_name}/{i}"
 
         if is_store_everything:
             baseline = StoreEverythingBaseline(persist_dir, embedder)
@@ -318,7 +365,7 @@ def run_locomo_eval(
 
         utterances = extract_utterances(conversation)
         qa_pairs = extract_qa(conversation)
-        valid_qa = [qa for qa in qa_pairs if qa.get("answer") and qa.get("question")]
+        valid_qa = [qa for qa in qa_pairs if qa.get("answer") and qa.get("question") and isinstance(qa.get("answer"), str)]
         n_turns = len(utterances)
 
         print(f"  [{result.baseline_name}] conv {conv_id}: {n_turns} turns, {len(valid_qa)} questions")
@@ -340,7 +387,18 @@ def run_locomo_eval(
                 hits += 1
             token_f1_sum += token_f1(retrieved, qa["answer"])
             if gen_client:
-                gen_f1_sum += generation_f1(retrieved, qa["question"], qa["answer"], gen_client, gen_model)
+                f1_score, generated = generation_f1(retrieved, qa["question"], qa["answer"], gen_client, gen_model)
+                gen_f1_sum += f1_score
+                import json as _json
+                with open(f"eval/qa_log_{result.baseline_name}.jsonl", "a") as _f:
+                    _f.write(_json.dumps({
+                        "conv_id": conv_id,
+                        "question": qa["question"],
+                        "gold": qa["answer"],
+                        "generated": generated,
+                        "retrieved": retrieved,
+                        "gen_f1": f1_score,
+                    }) + "\n")
             if llm_judge_client:
                 if retrieval_hit_llm(retrieved, qa["answer"], llm_judge_client, model=judge_model):
                     llm_hits += 1
@@ -390,14 +448,18 @@ def print_locomo_results(results: list[LoCoMoResult], has_gen_f1: bool = False) 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--n", default="5", help="Number of conversations (int or 'all')")
+    parser.add_argument("--only-filtered", action="store_true", help="Skip store-everything, run filtered-strength only")
     args = parser.parse_args()
 
     n = None if args.n == "all" else int(args.n)
+    only_filtered = args.only_filtered
     dataset = load_locomo(n=n)
     print(f"Loaded {len(dataset)} conversations\n")
 
     embedder = Embedder()
-    shared_filter = RelevanceFilter()
+    import sys
+    log_suffix = "_test" if only_filtered and n == 1 else ""
+    shared_filter = RelevanceFilter(log_path=f"eval/filter_decisions{log_suffix}.tsv")
 
     from openai import OpenAI
     gen_client = OpenAI(timeout=30.0)
@@ -406,8 +468,9 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         results = []
 
-        print("Running store-everything...")
-        results.append(run_locomo_eval(dataset, StoreEverythingBaseline, embedder, tmpdir, gen_client=gen_client, gen_model=gen_model))
+        if not only_filtered:
+            print("Running store-everything...")
+            results.append(run_locomo_eval(dataset, StoreEverythingBaseline, embedder, tmpdir, gen_client=gen_client, gen_model=gen_model))
 
         print("\nRunning filtered-strength...")
         results.append(run_locomo_eval(dataset, FilteredStrengthBaseline, embedder, tmpdir, shared_filter=shared_filter, gen_client=gen_client, gen_model=gen_model))
@@ -415,6 +478,37 @@ def main() -> None:
 
     print()
     print_locomo_results(results, has_gen_f1=True)
+
+    import json
+    from datetime import datetime
+    log = {
+        "timestamp": datetime.now().isoformat(),
+        "n_conversations": n,
+        "results": [
+            {
+                "baseline": r.baseline_name,
+                "avg_store_size": r.avg_store_size,
+                "token_f1": r.overall_token_f1,
+                "gen_f1": r.overall_gen_f1,
+                "total_questions": sum(c.n_questions for c in r.conversations),
+                "conversations": [
+                    {
+                        "conv_id": c.conversation_id,
+                        "store_size": c.store_size,
+                        "token_f1": c.avg_token_f1,
+                        "gen_f1": c.avg_gen_f1,
+                        "n_questions": c.n_questions,
+                    }
+                    for c in r.conversations
+                ],
+            }
+            for r in results
+        ],
+    }
+    log_path = f"eval/results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(log_path, "w") as f:
+        json.dump(log, f, indent=2)
+    print(f"\nResults saved to {log_path}")
 
 
 if __name__ == "__main__":
