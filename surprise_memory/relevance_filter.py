@@ -35,7 +35,12 @@ def _make_client(model: str) -> tuple[object, str]:
 
 
 class RelevanceFilter:
-    def __init__(self, model: str = "gpt-4o-mini", max_retries: int = 3, log_path: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str = "gpt-4o-mini",
+        max_retries: int = 3,
+        log_path: str | None = None,
+    ) -> None:
         self._client, self._model = _make_client(model)
         self._max_retries = max_retries
         self._cache: dict[str, bool] = self._load_cache()

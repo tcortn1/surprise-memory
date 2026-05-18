@@ -64,16 +64,14 @@ class MemoryManager:
 
         nearest_distance = min(distances) if distances else None
 
-        if is_novel(distances, self._config.novelty_threshold):
-            memory_id = self._store.add(observation, embedding)
-            return WriteResult(written=True, reason="novel", memory_id=memory_id, nearest_distance=nearest_distance)
-
+        # NLI runs first — contradictions are semantically different (novel) so must
+        # be checked before the novelty gate, otherwise they bypass contradiction detection.
         if self._config.use_llm_contradiction and self._llm_checker:
             contradicted = find_contradictions_llm(observation, neighbors[:1], self._llm_checker)
             nli_scores = []
             max_nli = None
-        else:
-            nearest = neighbors[:1]  # only check nearest neighbor — reduces cross-topic false positives
+        elif neighbors:
+            nearest = neighbors[:1]
             nli_scores = [
                 self._nli.contradiction_score(n["text"], observation)
                 for n in nearest
@@ -83,6 +81,10 @@ class MemoryManager:
                 n["id"] for n, score in zip(nearest, nli_scores)
                 if score >= self._config.contradiction_threshold
             ]
+        else:
+            contradicted = []
+            nli_scores = []
+            max_nli = None
 
         if contradicted:
             deprecated_ids = []
@@ -107,6 +109,10 @@ class MemoryManager:
                 nearest_distance=nearest_distance,
                 nli_score=max_nli,
             )
+
+        if is_novel(distances, self._config.novelty_threshold):
+            memory_id = self._store.add(observation, embedding)
+            return WriteResult(written=True, reason="novel", memory_id=memory_id, nearest_distance=nearest_distance, nli_score=max_nli)
 
         if self._config.use_strength and neighbors:
             nearest = min(neighbors, key=lambda n: n["distance"])

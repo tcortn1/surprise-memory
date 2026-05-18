@@ -4,6 +4,8 @@ data/locomo/
 eval/results_*.json
 eval/qa_log_*.jsonl
 eval/filter_decisions.tsv
+eval_output*.txt
+*.txt
 __pycache__/
 *.pyc
 .env
