@@ -108,7 +108,6 @@ All thresholds are tunable. `SURPRISE_MEMORY_` env prefix overrides any config f
 | D-MEM | Yes (gating) | Yes | Yes |
 | This system | Yes (gating) | Yes | No |
 
-D-MEM uses a learned Critic Router and knowledge graph. This system uses pre-trained models only — no training pipeline, no graph DB. Drop in and run.
 
 ## Stack
 
