@@ -8,11 +8,11 @@ Store-everything RAG pipelines bloat over time. After hundreds of conversations,
 
 ## How it works
 
-Each observation passes through four gates:
+Each observation passes through four gates in sequence:
 
 1. **LLM pre-filter** — is this a durable fact or transient noise?
-2. **Novelty gate** — is this already represented in the store?
-3. **Contradiction gate** — does this conflict with the nearest stored belief?
+2. **Contradiction gate** — does this conflict with the nearest stored belief? (runs before novelty — contradictions are semantically different from existing beliefs and would bypass NLI if checked after)
+3. **Novelty gate** — is this already represented in the store?
 4. **Strength mechanism** — confirmations reinforce, contradictions decay
 
 ```python
@@ -25,21 +25,24 @@ memory.write("Alex moved to Rotterdam")   # contradiction → Amsterdam decays t
 memory.retrieve("where does Alex live")   # returns Rotterdam
 ```
 
-## Results (LoCoMo benchmark, n=1)
+## Results (LoCoMo benchmark, n=10, 1980 questions)
 
-| Baseline | Store size | LLM hit rate |
+Generation F1: retrieve top-5, LLM generates answer, token F1 vs gold.
+
+| Baseline | Avg store size | Gen F1 |
 |---|---|---|
-| Store-everything | 419 | 0.24 |
-| Filtered-strength | 51 | 0.37 |
+| Store-everything | 588 | 0.203 |
+| Filtered-strength | **70.6** | **0.209** |
 
-88% store compression, 54% better retrieval quality.
+**88% store compression. Equivalent retrieval quality.**
+
+Filtering achieves 8× smaller store with no quality loss. Smaller stores mean lower latency, lower cost, and less retrieval noise at scale — without sacrificing accuracy.
 
 ## Setup
 
 ```bash
 poetry install
-export GROQ_API_KEY=gsk_...   # free at console.groq.com — used for pre-filter and eval judge
-# or: export OPENAI_API_KEY=sk-...
+export OPENAI_API_KEY=sk-...  # used for pre-filter and generation F1 scoring
 ```
 
 ## Run the demo
@@ -53,12 +56,15 @@ Shows each gate firing in real time on a sequence of observations about a fictio
 ## Run eval
 
 ```bash
+# targeted demo: contradiction, belief strength, noise — side-by-side vs store-everything
+poetry run python eval/demo_vs_store_everything.py
+
 # synthetic dataset (fast, no API calls for write phase)
 poetry run python eval/run_eval.py
 
-# LoCoMo benchmark (real conversations, requires API key)
+# LoCoMo benchmark (real conversations, requires OpenAI API key)
 poetry run python eval/locomo_eval.py --n 5
-poetry run python eval/locomo_eval.py --n 11
+poetry run python eval/locomo_eval.py --n 11 --only-filtered  # skip store-everything baseline
 ```
 
 ## Run tests
@@ -109,4 +115,4 @@ D-MEM uses a learned Critic Router and knowledge graph. This system uses pre-tra
 - Embeddings: `sentence-transformers/all-MiniLM-L6-v2` (local)
 - Vector store: ChromaDB (local, persistent)
 - Contradiction: `cross-encoder/nli-deberta-v3-large` (local)
-- Pre-filter: `llama-3.3-70b-versatile` via Groq or `gpt-4o-mini` via OpenAI
+- Pre-filter: `gpt-4o-mini` via OpenAI
